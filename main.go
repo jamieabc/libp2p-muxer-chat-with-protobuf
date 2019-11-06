@@ -5,6 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	mrand "math/rand"
+	"os"
+	"os/signal"
+
+	"github.com/golang/protobuf/proto"
+	"github.com/jamieabc/libp2p-muxer-chat-with-protobuf/pb"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
@@ -13,13 +19,11 @@ import (
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-libp2p-core/protocol"
 	"github.com/multiformats/go-multiaddr"
-	mrand "math/rand"
-	"os"
-	"os/signal"
 )
 
 const (
 	chatProtocol = "/mychat/1.0.0"
+	maxBytes     = 1000
 )
 
 func main() {
@@ -29,8 +33,8 @@ func main() {
 	} else {
 		s := clientMode()
 		rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
-		go readFromStdinAndWrite(rw)
-		go readFromStream(rw)
+		go readFromStdinAndWrite(rw, s, "client")
+		go readFromStream(rw, s)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -62,33 +66,55 @@ func serverMode() host.Host {
 func serverStreamHandler(s network.Stream) {
 	rw := bufio.NewReadWriter(bufio.NewReader(s), bufio.NewWriter(s))
 
-	go readFromStream(rw)
-	go readFromStdinAndWrite(rw)
+	go readFromStream(rw, s)
+	go readFromStdinAndWrite(rw, s, "server")
 }
 
-func readFromStdinAndWrite(rw *bufio.ReadWriter) {
+func readFromStdinAndWrite(rw *bufio.ReadWriter, s network.Stream, source string) {
+	defer s.Close()
+
 	stdin := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Printf("> ")
 		msg, err := stdin.ReadString('\n')
 		if nil != err {
+			fmt.Printf("read stream with error: %s\n", err)
+			return
+		}
+
+		data := &pb.Message{
+			Source: source,
+			Msg:    msg,
+		}
+		bin, err := proto.Marshal(data)
+		if nil != err {
 			panic(err)
 		}
 
-		_, _ = rw.WriteString(msg)
+		_, _ = rw.Write(bin)
 		_ = rw.Flush()
 	}
 }
 
-func readFromStream(rw *bufio.ReadWriter) {
+func readFromStream(rw *bufio.ReadWriter, s network.Stream) {
+	defer s.Close()
+
+	data := make([]byte, maxBytes)
 	for {
-		msg, _ := rw.ReadString('\n')
-		if "" == msg {
+		length, err := rw.Read(data)
+		if nil != err {
+			fmt.Printf("read stream with error: %s\n", err)
 			return
 		}
-		if "\n" != msg {
-			fmt.Println("receive message: ", msg)
+		if 0 == length {
+			continue
 		}
+		out := pb.Message{}
+		err = proto.Unmarshal(data[:length], &out)
+		if nil != err {
+			panic(err)
+		}
+		fmt.Printf("from %s: %s", out.Source, out.Msg)
 	}
 }
 
